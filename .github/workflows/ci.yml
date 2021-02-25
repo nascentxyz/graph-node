@@ -55,6 +55,9 @@ jobs:
           toolchain: ${{ matrix.rust }}
           override: true
 
+      - name: Install lld
+        run: sudo apt-get install -y lld
+
       - name: Run unit tests
         uses: actions-rs/cargo@v1
         env:
@@ -94,6 +97,9 @@ jobs:
           profile: minimal
           toolchain: ${{ matrix.rust }}
           override: true
+
+      - name: Install lld
+        run: sudo apt-get install -y lld
 
       - name: Build graph-node
         env:
@@ -138,6 +144,9 @@ jobs:
           sudo apt-get update
           sudo apt-get -y install libpq-dev
 
+      - name: Install lld
+        run: sudo apt-get install -y lld
+
       - name: Check formating
         uses: actions-rs/cargo@v1
         env:
@@ -171,6 +180,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get -y install libpq-dev
+
+      - name: Install lld
+        run: sudo apt-get install -y lld
 
       - name: Cargo check (debug)
         uses: actions-rs/cargo@v1

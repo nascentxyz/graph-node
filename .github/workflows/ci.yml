@@ -57,6 +57,8 @@ jobs:
 
       - name: Run unit tests
         uses: actions-rs/cargo@v1
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=lld -D warnings"
         with:
           command: test
           args: --verbose --workspace --exclude graph-tests -- --nocapture
@@ -95,13 +97,15 @@ jobs:
 
       - name: Build graph-node
         env:
-          RUSTFLAGS: "-D warnings"
+          RUSTFLAGS: "-C link-arg=-fuse-ld=lld -D warnings"
         uses: actions-rs/cargo@v1
         with:
           command: build
 
       - name: Run integration tests
         uses: actions-rs/cargo@v1
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=lld -D warnings"
         with:
           command: test
           args: --verbose --package graph-tests -- --nocapture
@@ -136,6 +140,8 @@ jobs:
 
       - name: Check formating
         uses: actions-rs/cargo@v1
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=lld -D warnings"
         with:
           command: fmt
           args: --all -- --check
@@ -167,16 +173,16 @@ jobs:
           sudo apt-get -y install libpq-dev
 
       - name: Cargo check (debug)
-        env:
-          RUSTFLAGS: "-D warnings"
         uses: actions-rs/cargo@v1
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=lld -D warnings"
         with:
           command: check
           args: --tests
 
       - name: Cargo check (release)
         env:
-          RUSTFLAGS: "-D warnings"
+          RUSTFLAGS: "-C link-arg=-fuse-ld=lld -D warnings"
         uses: actions-rs/cargo@v1
         with:
           command: check

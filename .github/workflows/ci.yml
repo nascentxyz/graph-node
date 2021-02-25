@@ -116,7 +116,6 @@ jobs:
           command: test
           args: --verbose --package graph-tests -- --nocapture
 
-
   rustfmt:
     name: Check rustfmt style
     strategy:
@@ -144,13 +143,10 @@ jobs:
           sudo apt-get update
           sudo apt-get -y install libpq-dev
 
-      - name: Install lld
-        run: sudo apt-get install -y lld
-
       - name: Check formating
         uses: actions-rs/cargo@v1
         env:
-          RUSTFLAGS: "-C link-arg=-fuse-ld=lld -D warnings"
+          RUSTFLAGS: "-D warnings"
         with:
           command: fmt
           args: --all -- --check
@@ -181,20 +177,17 @@ jobs:
           sudo apt-get update
           sudo apt-get -y install libpq-dev
 
-      - name: Install lld
-        run: sudo apt-get install -y lld
-
       - name: Cargo check (debug)
         uses: actions-rs/cargo@v1
         env:
-          RUSTFLAGS: "-C link-arg=-fuse-ld=lld -D warnings"
+          RUSTFLAGS: "-D warnings"
         with:
           command: check
           args: --tests
 
       - name: Cargo check (release)
         env:
-          RUSTFLAGS: "-C link-arg=-fuse-ld=lld -D warnings"
+          RUSTFLAGS: "-D warnings"
         uses: actions-rs/cargo@v1
         with:
           command: check

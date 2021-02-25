@@ -93,6 +93,13 @@ jobs:
           toolchain: ${{ matrix.rust }}
           override: true
 
+      - name: Build graph-node
+        env:
+          RUSTFLAGS: "-D warnings"
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+
       - name: Run integration tests
         uses: actions-rs/cargo@v1
         with:

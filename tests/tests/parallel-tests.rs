@@ -8,7 +8,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// A counter for uniquely naming Ganache containers
 static GANACHE_CONTAINER_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 const POSTGRES_IMAGE: &'static str = "postgres";
 const IPFS_IMAGE: &'static str = "ipfs/go-ipfs:v0.4.23";
 const GANACHE_IMAGE: &'static str = "trufflesuite/ganache-cli";
@@ -102,6 +104,7 @@ impl TestContainerService {
     }
 }
 
+/// Handles the connection to the docker daemon and keeps track the service running inside it.
 struct DockerTestClient {
     service: TestContainerService,
     client: Docker,
@@ -152,6 +155,7 @@ async fn parallel_integration_tests() {
         discover_test_directories(&integration_tests_root_directory, 1)
             .expect("failed to discover integration test directories");
 
+    // Show discovered tests
     println!(
         "Found {} integration test directories:",
         integration_tests_directories.len()
@@ -163,7 +167,7 @@ async fn parallel_integration_tests() {
         );
     }
 
-    // start docker containers for Postgres and Ipfs
+    // start docker containers for Postgres and IPFS
     let postgres = DockerTestClient::start(TestContainerService::Postgres)
         .await
         .expect("failed to start container service for Postgres.");
@@ -224,6 +228,7 @@ async fn run_integration_test(test_directory: PathBuf) -> TestResult {
     }
 }
 
+/// fetches a unique number for naming Ganache containers
 fn get_unique_counter() -> u32 {
     let old_ganache_count = GANACHE_CONTAINER_COUNT.fetch_add(1, Ordering::SeqCst);
     (old_ganache_count + 1) as u32

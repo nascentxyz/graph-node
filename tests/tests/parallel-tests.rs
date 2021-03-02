@@ -1,13 +1,16 @@
 use bollard::{container, Docker};
 use futures::{stream::futures_unordered::FuturesUnordered, StreamExt};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+static GANACHE_CONTAINER_COUNT: AtomicUsize = AtomicUsize::new(0);
 const POSTGRES_IMAGE: &'static str = "postgres";
 const IPFS_IMAGE: &'static str = "ipfs/go-ipfs:v0.4.23";
+const GANACHE_IMAGE: &'static str = "trufflesuite/ganache-cli";
 
 type DockerError = bollard::errors::Error;
 
@@ -33,6 +36,7 @@ fn discover_test_directories(dir: &Path, max_depth: u8) -> io::Result<HashSet<Pa
 enum TestContainerService {
     Postgres,
     Ipfs,
+    Ganache(u32),
 }
 
 fn build_postgres_container() -> container::Config<&'static str> {
@@ -50,22 +54,49 @@ fn build_ipfs_container_config() -> container::Config<&'static str> {
     }
 }
 
+fn build_ganache_container_config() -> container::Config<&'static str> {
+    // An object mapping ports to an empty object in the form: {\"<port>/<tcp|udp|sctp>\": {}}
+    let mut exposed_ports = HashMap::new();
+    exposed_ports.insert("8545/tcp", HashMap::new());
+
+    container::Config {
+        image: Some(GANACHE_IMAGE),
+        cmd: Some(vec![
+            "-d",
+            "-l",
+            "100000000000",
+            "-g",
+            "1",
+            "--noVMErrorsOnRPCResponse",
+        ]),
+        exposed_ports: Some(exposed_ports),
+
+        ..Default::default()
+    }
+}
+
 impl TestContainerService {
     fn config(&self) -> container::Config<&'static str> {
-        match &self {
-            TestContainerService::Postgres => build_postgres_container(),
-            TestContainerService::Ipfs => build_ipfs_container_config(),
+        use TestContainerService::*;
+        match self {
+            Postgres => build_postgres_container(),
+            Ipfs => build_ipfs_container_config(),
+            Ganache(_u32) => build_ganache_container_config(),
         }
     }
 
-    fn options(&self) -> container::CreateContainerOptions<&'static str> {
+    fn options(&self) -> container::CreateContainerOptions<String> {
         container::CreateContainerOptions { name: self.name() }
     }
 
-    fn name(&self) -> &'static str {
-        match &self {
-            TestContainerService::Postgres => "graph_node_integration_test_postgres",
-            TestContainerService::Ipfs => "graph_node_integration_test_ipfs",
+    fn name(&self) -> String {
+        use TestContainerService::*;
+        match self {
+            Postgres => "graph_node_integration_test_postgres".into(),
+            Ipfs => "graph_node_integration_test_ipfs".into(),
+            Ganache(container_count) => {
+                format!("graph_node_integration_test_ganache_{}", container_count)
+            }
         }
     }
 }
@@ -77,14 +108,19 @@ struct DockerTestClient {
 
 impl DockerTestClient {
     async fn start(service: TestContainerService) -> Result<Self, DockerError> {
-        println!("Creating service container for: {}", service.name());
+        println!(
+            "Connecting to docker daemon for service: {}",
+            service.name()
+        );
         let client =
             Docker::connect_with_local_defaults().expect("Failed to connect to docker daemon.");
 
         // try to remove the container if it already exists
-        client.remove_container(service.name(), None).await?;
+        let _ = client.remove_container(&service.name(), None).await;
 
         // create docker container
+        println!("Creating service container for: {}", service.name());
+
         client
             .create_container(Some(service.options()), service.config())
             .await?;
@@ -92,7 +128,7 @@ impl DockerTestClient {
         // start docker container
         println!("Starting service container for: {}", service.name());
         client
-            .start_container::<&'static str>(service.name(), None)
+            .start_container::<&'static str>(&service.name(), None)
             .await?;
 
         Ok(Self { service, client })
@@ -101,7 +137,7 @@ impl DockerTestClient {
     async fn stop(&self) -> Result<(), DockerError> {
         println!("Stopping service container for: {}", self.service.name());
         self.client
-            .kill_container::<&'static str>(self.service.name(), None)
+            .kill_container::<String>(&self.service.name(), None)
             .await
     }
 }
@@ -140,7 +176,7 @@ async fn parallel_integration_tests() {
         tests_futures.push(tokio::spawn(run_integration_test(dir)));
     }
     while let Some(test_result) = tests_futures.next().await {
-        let test_result = test_result.expect("failed to await for test future.");
+        // let test_result = test_result.expect("failed to await for test future.");
         println!("{:?}", test_result);
     }
 
@@ -161,11 +197,22 @@ struct TestResult {
 }
 
 async fn run_integration_test(test_directory: PathBuf) -> TestResult {
+    let _ganache = DockerTestClient::start(TestContainerService::Ganache(get_unique_counter()))
+        .await
+        .expect("failed to start container service for Ganache.");
+
+    // TODO: call graph-cli and run yarn tests
     println!(
         "Test started for: {}",
         test_directory.file_name().unwrap().to_string_lossy()
     );
-    // TODO: run actual tests here
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // ganache
+    //     .stop()
+    //     .await
+    //     .expect("failed to stop container service for Ganache");
+
     TestResult {
         name: test_directory
             .file_name()
@@ -174,4 +221,9 @@ async fn run_integration_test(test_directory: PathBuf) -> TestResult {
             .to_string(),
         errors: vec![],
     }
+}
+
+fn get_unique_counter() -> u32 {
+    let old_ganache_count = GANACHE_CONTAINER_COUNT.fetch_add(1, Ordering::SeqCst);
+    (old_ganache_count + 1) as u32
 }

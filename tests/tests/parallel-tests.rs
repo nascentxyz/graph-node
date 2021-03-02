@@ -1,6 +1,7 @@
+use bollard::models::HostConfig;
 use bollard::{container, Docker};
 use futures::{stream::futures_unordered::FuturesUnordered, StreamExt};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -55,9 +56,10 @@ fn build_ipfs_container_config() -> container::Config<&'static str> {
 }
 
 fn build_ganache_container_config() -> container::Config<&'static str> {
-    // An object mapping ports to an empty object in the form: {\"<port>/<tcp|udp|sctp>\": {}}
-    let mut exposed_ports = HashMap::new();
-    exposed_ports.insert("8545/tcp", HashMap::new());
+    let host_config = HostConfig {
+        publish_all_ports: Some(true),
+        ..Default::default()
+    };
 
     container::Config {
         image: Some(GANACHE_IMAGE),
@@ -69,8 +71,7 @@ fn build_ganache_container_config() -> container::Config<&'static str> {
             "1",
             "--noVMErrorsOnRPCResponse",
         ]),
-        exposed_ports: Some(exposed_ports),
-
+        host_config: Some(host_config),
         ..Default::default()
     }
 }

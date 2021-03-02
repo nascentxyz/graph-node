@@ -1,10 +1,10 @@
 use bollard::{container, Docker};
+use futures::{stream::futures_unordered::FuturesUnordered, StreamExt};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use tokio::time::{sleep, Duration};
 
 const POSTGRES_IMAGE: &'static str = "postgres";
 const IPFS_IMAGE: &'static str = "ipfs/go-ipfs:v0.4.23";
@@ -134,13 +134,14 @@ async fn parallel_integration_tests() {
         .await
         .expect("failed to start container service for IPFS.");
 
-    // run each test
-    for dir in &integration_tests_directories {
-        println!(
-            "running test for: {}",
-            dir.file_name().map(OsStr::to_string_lossy).unwrap()
-        );
-        sleep(Duration::from_millis(100)).await; // TODO: run actual tests here
+    // run tests
+    let mut tests_futures = FuturesUnordered::new();
+    for dir in integration_tests_directories.into_iter() {
+        tests_futures.push(tokio::spawn(run_integration_test(dir)));
+    }
+    while let Some(test_result) = tests_futures.next().await {
+        let test_result = test_result.expect("failed to await for test future.");
+        println!("{:?}", test_result);
     }
 
     // Stop containers.
@@ -151,4 +152,26 @@ async fn parallel_integration_tests() {
     ipfs.stop()
         .await
         .expect("failed to stop container service for IPFS");
+}
+
+#[derive(Debug)]
+struct TestResult {
+    name: String,
+    errors: Vec<String>,
+}
+
+async fn run_integration_test(test_directory: PathBuf) -> TestResult {
+    println!(
+        "Test started for: {}",
+        test_directory.file_name().unwrap().to_string_lossy()
+    );
+    // TODO: run actual tests here
+    TestResult {
+        name: test_directory
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string(),
+        errors: vec![],
+    }
 }

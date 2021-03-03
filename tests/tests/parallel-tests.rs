@@ -21,6 +21,17 @@ const GANACHE_IMAGE: &'static str = "trufflesuite/ganache-cli";
 
 type DockerError = bollard::errors::Error;
 
+/// Strip parent directories from filenames
+fn basename(path: &Path) -> std::borrow::Cow<'_, str> {
+    path.file_name().map(OsStr::to_string_lossy).unwrap()
+}
+
+/// Fetches a unique number for naming Ganache containers
+fn get_unique_counter() -> u32 {
+    let old_ganache_count = GANACHE_CONTAINER_COUNT.fetch_add(1, Ordering::SeqCst);
+    (old_ganache_count + 1) as u32
+}
+
 /// Recursivelly find directories that contains a `subgraph.yaml` file.
 fn discover_test_directories(dir: &Path, max_depth: u8) -> io::Result<HashSet<PathBuf>> {
     let mut found_directories: HashSet<PathBuf> = HashSet::new();
@@ -30,7 +41,7 @@ fn discover_test_directories(dir: &Path, max_depth: u8) -> io::Result<HashSet<Pa
             if path.is_dir() && max_depth > 0 {
                 let new_depth = max_depth - 1;
                 found_directories.extend(discover_test_directories(&path, new_depth)?)
-            } else if path.file_name() == Some(OsStr::new("subgraph.yaml")) {
+            } else if basename(&path) == "subgraph.yaml" {
                 found_directories.insert(dir.into());
                 continue;
             }
@@ -196,10 +207,7 @@ async fn parallel_integration_tests() {
         integration_tests_directories.len()
     );
     for dir in &integration_tests_directories {
-        println!(
-            "  - {}",
-            dir.file_name().map(OsStr::to_string_lossy).unwrap()
-        );
+        println!("  - {}", basename(dir));
     }
 
     // start docker containers for Postgres and IPFS
@@ -286,48 +294,28 @@ struct TestResult {
 
 async fn run_integration_test(
     test_directory: PathBuf,
-    service_ports: Arc<TestServicePorts>,
+    _service_ports: Arc<TestServicePorts>,
 ) -> TestResult {
     // start a dedicated ganache container for this test
+    let test_name = basename(&test_directory);
     let ganache = DockerTestClient::start(TestContainerService::Ganache(get_unique_counter()))
         .await
         .expect("failed to start container service for Ganache.");
 
-    let ganache_ports = ganache
+    let _ganache_ports = ganache
         .exposed_ports()
         .await
         .expect("failed to obtain exposed ports for Ganache container");
-    dbg!(service_ports); // TODO: remove this
-    dbg!(ganache_ports); // TODO: remove this
 
-    println!(
-        "Test started for: {}",
-        test_directory.file_name().unwrap().to_string_lossy()
-    );
+    println!("Test started: {}", basename(&test_directory));
 
     // discover programs paths
-    let graph_cli = test_directory.join("node_modules/.bin/graph");
-    let graph_node = fs::canonicalize("../target/debug/graph-node")
+    let _graph_cli = test_directory.join("node_modules/.bin/graph");
+    let _graph_node = fs::canonicalize("../target/debug/graph-node")
         .expect("failed to infer `graph-node` program location. (Was it built already?)");
 
     // run the test
-    let (_success, _exit_code) = run_command(vec!["yarn"], &test_directory).await;
-    let (success, _exit_code) = run_command(
-        vec![
-            graph_cli.to_str().unwrap(),
-            "test",
-            "--standalone-node",
-            graph_node.to_str().unwrap(),
-            "--postgres-uri=TODO",
-            "--ipfs-uri=TODO",
-            "--ganache-uri=TODO",
-            "--timeout",
-            "100000",
-            "yarn test",
-        ],
-        &test_directory,
-    )
-    .await;
+    let success = run_command(vec!["yarn", "test"], &test_directory).await;
 
     // stop ganache container
     ganache
@@ -336,35 +324,24 @@ async fn run_integration_test(
         .expect("failed to stop container service for Ganache");
 
     TestResult {
-        name: test_directory
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string(),
+        name: test_name.to_string(),
         success,
     }
 }
 
-/// fetches a unique number for naming Ganache containers
-fn get_unique_counter() -> u32 {
-    let old_ganache_count = GANACHE_CONTAINER_COUNT.fetch_add(1, Ordering::SeqCst);
-    (old_ganache_count + 1) as u32
-}
-
 /// Prefixes each line with a pipe and a space
-fn pretty_output(stdio: &[u8]) -> String {
+fn pretty_output(stdio: &[u8], prefix: &str) -> String {
     String::from_utf8_lossy(&stdio)
         .trim()
         .split("\n")
-        .map(|s| format!("│ {}", s))
+        .map(|s| format!("{}{}", prefix, s))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
 /// Runs a command and prints both its stdout and stderr
-async fn run_command(args: Vec<&str>, cwd: &Path) -> (bool, Option<i32>) {
+async fn run_command(args: Vec<&str>, cwd: &Path) -> bool {
     let command_string = args.clone().join(" ");
-    println!("running command: `{}`", command_string);
     let (program, args) = args.split_first().expect("empty command provided");
 
     let output = Command::new(program)
@@ -374,13 +351,12 @@ async fn run_command(args: Vec<&str>, cwd: &Path) -> (bool, Option<i32>) {
         .await
         .expect(&format!("command failed to run: `{}`", command_string));
 
-    println!("Command STDOUT:\n{}", pretty_output(&output.stdout));
-    println!("Command STDERR:\n{}", pretty_output(&output.stderr));
+    // print stdout and stderr
+    let test_name = basename(cwd);
+    let stdout_tag = format!("[{}:stdout] ", test_name);
+    let stderr_tag = format!("[{}:stderr] ", test_name);
+    println!("{}", pretty_output(&output.stdout, &stdout_tag));
+    println!("{}", pretty_output(&output.stderr, &stderr_tag));
 
-    (output.status.success(), output.status.code())
-}
-
-#[allow(dead_code)]
-fn run_test(_test: &str) {
-    todo!("copy");
+    output.status.success()
 }

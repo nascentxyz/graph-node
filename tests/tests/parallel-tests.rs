@@ -287,6 +287,8 @@ struct MappedPorts(HashMap<u16, u16>);
 impl From<Vec<bollard::models::Port>> for MappedPorts {
     fn from(input: Vec<bollard::models::Port>) -> MappedPorts {
         let mut hashmap = HashMap::new();
+        let mut empty = true;
+
         for port in &input {
             if let bollard::models::Port {
                 private_port,
@@ -294,8 +296,12 @@ impl From<Vec<bollard::models::Port>> for MappedPorts {
                 ..
             } = port
             {
+                empty = false;
                 hashmap.insert(*private_port as u16, *public_port as u16);
             }
+        }
+        if empty {
+            panic!("Error: container exposed no ports.")
         }
         MappedPorts(hashmap)
     }

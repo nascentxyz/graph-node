@@ -140,10 +140,6 @@ struct DockerTestClient {
 
 impl DockerTestClient {
     async fn start(service: TestContainerService) -> Result<Self, DockerError> {
-        println!(
-            "Connecting to docker daemon for service: {}",
-            service.name()
-        );
         let client =
             Docker::connect_with_local_defaults().expect("Failed to connect to docker daemon.");
 
@@ -151,14 +147,11 @@ impl DockerTestClient {
         let _ = stop_and_remove(&client, &service.name()).await;
 
         // create docker container
-        println!("Creating service container for: {}", service.name());
-
         client
             .create_container(Some(service.options()), service.config())
             .await?;
 
         // start docker container
-        println!("Starting service container for: {}", service.name());
         client
             .start_container::<&'static str>(&service.name(), None)
             .await?;
@@ -180,6 +173,10 @@ impl DockerTestClient {
             ..Default::default()
         });
         let results = self.client.list_containers(options).await?;
+
+        // TODO: sometimes the program crashes complaining that "there are no exposed ports", but
+        // upon close inspection, container does have exposed ports. Maybe this is an API/networking
+        // error which might be worth investigating.
         match &results.as_slice() {
             &[ContainerSummaryInner {
                 ports: Some(ports), ..
@@ -254,7 +251,7 @@ async fn parallel_integration_tests() {
         .expect("failed to stop container service for IPFS");
 
     // print test results
-    println!("Test results:");
+    println!("\nTest results:");
     for test_result in &test_results {
         println!("- {:?}", test_result)
     }

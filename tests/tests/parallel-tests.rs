@@ -4,7 +4,7 @@ use futures::{stream::futures_unordered::FuturesUnordered, StreamExt};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
-use std::io;
+use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -329,14 +329,24 @@ async fn run_integration_test(
     }
 }
 
-/// Prefixes each line with a pipe and a space
+/// Parses stdio bytes into a prefixed String
 fn pretty_output(stdio: &[u8], prefix: &str) -> String {
-    String::from_utf8_lossy(&stdio)
-        .trim()
-        .split("\n")
-        .map(|s| format!("{}{}", prefix, s))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut cursor = io::Cursor::new(stdio);
+    let mut buf = vec![];
+    let mut string = String::new();
+    loop {
+        buf.clear();
+        let bytes_read = cursor
+            .read_until(b'\n', &mut buf)
+            .expect("failed to read from stdio.");
+        if bytes_read == 0 {
+            break;
+        }
+        let as_string = String::from_utf8_lossy(&buf);
+        string.push_str(&prefix);
+        string.push_str(&as_string); // will contain a newline
+    }
+    string
 }
 
 /// Runs a command and prints both its stdout and stderr

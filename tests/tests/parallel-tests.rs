@@ -1,12 +1,15 @@
 use bollard::models::HostConfig;
 use bollard::{container, Docker};
 use futures::{stream::futures_unordered::FuturesUnordered, StreamExt};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 /// A counter for uniquely naming Ganache containers
 static GANACHE_CONTAINER_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -35,7 +38,7 @@ fn discover_test_directories(dir: &Path, max_depth: u8) -> io::Result<HashSet<Pa
     Ok(found_directories)
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 enum TestContainerService {
     Postgres,
     Ipfs,
@@ -43,16 +46,28 @@ enum TestContainerService {
 }
 
 fn build_postgres_container() -> container::Config<&'static str> {
+    let host_config = HostConfig {
+        publish_all_ports: Some(true),
+        ..Default::default()
+    };
+
     container::Config {
         image: Some(POSTGRES_IMAGE),
         env: Some(vec!["POSTGRES_PASSWORD=password", "POSTGRES_USER=postgres"]),
+        host_config: Some(host_config),
         ..Default::default()
     }
 }
 
 fn build_ipfs_container_config() -> container::Config<&'static str> {
+    let host_config = HostConfig {
+        publish_all_ports: Some(true),
+        ..Default::default()
+    };
+
     container::Config {
         image: Some(IPFS_IMAGE),
+        host_config: Some(host_config),
         ..Default::default()
     }
 }
@@ -144,6 +159,25 @@ impl DockerTestClient {
             .kill_container::<String>(&self.service.name(), None)
             .await
     }
+
+    async fn exposed_ports(&self) -> Result<Vec<bollard::models::Port>, DockerError> {
+        use bollard::models::ContainerSummaryInner;
+        let mut filters = HashMap::new();
+        filters.insert("name".to_string(), vec![self.service.name()]);
+        let options = Some(container::ListContainersOptions {
+            filters,
+            ..Default::default()
+        });
+        let results = self.client.list_containers(options).await?;
+        if let &[ContainerSummaryInner {
+            ports: Some(ports), ..
+        }] = &results.as_slice()
+        {
+            Ok(ports.to_vec())
+        } else {
+            Ok(Vec::new())
+        }
+    }
 }
 
 #[tokio::test]
@@ -175,10 +209,18 @@ async fn parallel_integration_tests() {
         .await
         .expect("failed to start container service for IPFS.");
 
+    let service_ports = Arc::new(TestServicePorts {
+        postgres: postgres.exposed_ports().await.unwrap().into(),
+        ipfs: ipfs.exposed_ports().await.unwrap().into(),
+    });
+
     // run tests
     let mut tests_futures = FuturesUnordered::new();
     for dir in integration_tests_directories.into_iter() {
-        tests_futures.push(tokio::spawn(run_integration_test(dir)));
+        tests_futures.push(tokio::spawn(run_integration_test(
+            dir,
+            Arc::clone(&service_ports),
+        )));
     }
     while let Some(test_result) = tests_futures.next().await {
         // let test_result = test_result.expect("failed to await for test future.");
@@ -196,13 +238,22 @@ async fn parallel_integration_tests() {
 }
 
 #[derive(Debug)]
+struct TestServicePorts {
+    postgres: MappedPorts,
+    ipfs: MappedPorts,
+}
+
+#[derive(Debug)]
 struct TestResult {
     name: String,
     errors: Vec<String>,
 }
 
-async fn run_integration_test(test_directory: PathBuf) -> TestResult {
-    let _ganache = DockerTestClient::start(TestContainerService::Ganache(get_unique_counter()))
+async fn run_integration_test(
+    test_directory: PathBuf,
+    service_ports: Arc<TestServicePorts>,
+) -> TestResult {
+    let ganache = DockerTestClient::start(TestContainerService::Ganache(get_unique_counter()))
         .await
         .expect("failed to start container service for Ganache.");
 
@@ -212,11 +263,12 @@ async fn run_integration_test(test_directory: PathBuf) -> TestResult {
         test_directory.file_name().unwrap().to_string_lossy()
     );
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    println!("{:#?}", service_ports);
 
-    // ganache
-    //     .stop()
-    //     .await
-    //     .expect("failed to stop container service for Ganache");
+    ganache
+        .stop()
+        .await
+        .expect("failed to stop container service for Ganache");
 
     TestResult {
         name: test_directory
@@ -225,6 +277,27 @@ async fn run_integration_test(test_directory: PathBuf) -> TestResult {
             .to_string_lossy()
             .to_string(),
         errors: vec![],
+    }
+}
+
+/// Maps `Service => Host` exposed ports.
+#[derive(Debug)]
+struct MappedPorts(HashMap<u16, u16>);
+
+impl From<Vec<bollard::models::Port>> for MappedPorts {
+    fn from(input: Vec<bollard::models::Port>) -> MappedPorts {
+        let mut hashmap = HashMap::new();
+        for port in &input {
+            if let bollard::models::Port {
+                private_port,
+                public_port: Some(public_port),
+                ..
+            } = port
+            {
+                hashmap.insert(*private_port as u16, *public_port as u16);
+            }
+        }
+        MappedPorts(hashmap)
     }
 }
 

@@ -2,6 +2,7 @@ use bollard::models::HostConfig;
 use bollard::{container, Docker};
 use futures::{stream::futures_unordered::FuturesUnordered, StreamExt};
 use std::collections::{HashMap, HashSet};
+use std::convert::{TryFrom, TryInto};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufRead};
@@ -147,7 +148,7 @@ impl DockerTestClient {
             Docker::connect_with_local_defaults().expect("Failed to connect to docker daemon.");
 
         // try to remove the container if it already exists
-        let _ = client.remove_container(&service.name(), None).await;
+        let _ = stop_and_remove(&client, &service.name()).await;
 
         // create docker container
         println!("Creating service container for: {}", service.name());
@@ -167,9 +168,7 @@ impl DockerTestClient {
 
     async fn stop(&self) -> Result<(), DockerError> {
         println!("Stopping service container for: {}", self.service.name());
-        self.client
-            .kill_container::<String>(&self.service.name(), None)
-            .await
+        stop_and_remove(&self.client, &self.service.name()).await
     }
 
     async fn exposed_ports(&self) -> Result<MappedPorts, DockerError> {
@@ -181,13 +180,11 @@ impl DockerTestClient {
             ..Default::default()
         });
         let results = self.client.list_containers(options).await?;
-        if let &[ContainerSummaryInner {
-            ports: Some(ports), ..
-        }] = &results.as_slice()
-        {
-            Ok(ports.to_vec().into())
-        } else {
-            Ok(Vec::new().into())
+        match &results.as_slice() {
+            &[ContainerSummaryInner {
+                ports: Some(ports), ..
+            }] => Ok(ports.to_vec().try_into().unwrap()),
+            _ => panic!("container exposed no ports: {}", self.service.name()),
         }
     }
 }
@@ -230,6 +227,8 @@ async fn parallel_integration_tests() {
     });
 
     // run tests
+    let mut test_results = Vec::new();
+    let mut exit_code: i32 = 0;
     let mut tests_futures = FuturesUnordered::new();
     for dir in integration_tests_directories.into_iter() {
         tests_futures.push(tokio::spawn(run_integration_test(
@@ -238,8 +237,11 @@ async fn parallel_integration_tests() {
         )));
     }
     while let Some(test_result) = tests_futures.next().await {
-        // let test_result = test_result.expect("failed to await for test future.");
-        println!("{:?}", test_result);
+        let test_result = test_result.expect("failed to await for test future.");
+        if !test_result.success {
+            exit_code = 101;
+        }
+        test_results.push(test_result);
     }
 
     // Stop containers.
@@ -250,16 +252,24 @@ async fn parallel_integration_tests() {
     ipfs.stop()
         .await
         .expect("failed to stop container service for IPFS");
+
+    // print test results
+    println!("Test results:");
+    for test_result in &test_results {
+        println!("- {:?}", test_result)
+    }
+
+    std::process::exit(exit_code)
 }
 
 /// Maps `Service => Host` exposed ports.
 #[derive(Debug)]
 struct MappedPorts(HashMap<u16, u16>);
 
-impl From<Vec<bollard::models::Port>> for MappedPorts {
-    fn from(input: Vec<bollard::models::Port>) -> MappedPorts {
+impl TryFrom<Vec<bollard::models::Port>> for MappedPorts {
+    type Error = &'static str;
+    fn try_from(input: Vec<bollard::models::Port>) -> Result<Self, Self::Error> {
         let mut hashmap = HashMap::new();
-        let mut empty = true;
 
         for port in &input {
             if let bollard::models::Port {
@@ -268,14 +278,15 @@ impl From<Vec<bollard::models::Port>> for MappedPorts {
                 ..
             } = port
             {
-                empty = false;
                 hashmap.insert(*private_port as u16, *public_port as u16);
             }
         }
-        if empty {
-            panic!("Error: container exposed no ports.")
+        if hashmap.is_empty() {
+            println!("ERROR!: NO PORTS: {:?}", &input);
+            Err("Container exposed no ports")
+        } else {
+            Ok(MappedPorts(hashmap))
         }
-        MappedPorts(hashmap)
     }
 }
 
@@ -369,4 +380,9 @@ async fn run_command(args: Vec<&str>, cwd: &Path) -> bool {
     println!("{}", pretty_output(&output.stderr, &stderr_tag));
 
     output.status.success()
+}
+
+async fn stop_and_remove(client: &Docker, service_name: &str) -> Result<(), DockerError> {
+    client.kill_container::<&str>(service_name, None).await?;
+    client.remove_container(service_name, None).await
 }

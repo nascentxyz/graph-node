@@ -10,6 +10,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
+use tokio::process::Command;
 
 /// A counter for uniquely naming Ganache containers
 static GANACHE_CONTAINER_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -280,7 +281,7 @@ struct TestServicePorts {
 #[derive(Debug)]
 struct TestResult {
     name: String,
-    errors: Vec<String>,
+    success: bool,
 }
 
 async fn run_integration_test(
@@ -296,15 +297,37 @@ async fn run_integration_test(
         .exposed_ports()
         .await
         .expect("failed to obtain exposed ports for Ganache container");
-    dbg!(ganache_ports);
+    dbg!(service_ports); // TODO: remove this
+    dbg!(ganache_ports); // TODO: remove this
 
-    // TODO: call graph-cli and run yarn tests
     println!(
         "Test started for: {}",
         test_directory.file_name().unwrap().to_string_lossy()
     );
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    println!("{:#?}", service_ports);
+
+    // discover programs paths
+    let graph_cli = test_directory.join("node_modules/.bin/graph");
+    let graph_node = fs::canonicalize("../target/debug/graph-node")
+        .expect("failed to infer `graph-node` program location. (Was it built already?)");
+
+    // run the test
+    let (_success, _exit_code) = run_command(vec!["yarn"], &test_directory).await;
+    let (success, _exit_code) = run_command(
+        vec![
+            graph_cli.to_str().unwrap(),
+            "test",
+            "--standalone-node",
+            graph_node.to_str().unwrap(),
+            "--postgres-uri=TODO",
+            "--ipfs-uri=TODO",
+            "--ganache-uri=TODO",
+            "--timeout",
+            "100000",
+            "yarn test",
+        ],
+        &test_directory,
+    )
+    .await;
 
     // stop ganache container
     ganache
@@ -318,7 +341,7 @@ async fn run_integration_test(
             .unwrap()
             .to_string_lossy()
             .to_string(),
-        errors: vec![],
+        success,
     }
 }
 
@@ -326,4 +349,38 @@ async fn run_integration_test(
 fn get_unique_counter() -> u32 {
     let old_ganache_count = GANACHE_CONTAINER_COUNT.fetch_add(1, Ordering::SeqCst);
     (old_ganache_count + 1) as u32
+}
+
+/// Prefixes each line with a pipe and a space
+fn pretty_output(stdio: &[u8]) -> String {
+    String::from_utf8_lossy(&stdio)
+        .trim()
+        .split("\n")
+        .map(|s| format!("│ {}", s))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Runs a command and prints both its stdout and stderr
+async fn run_command(args: Vec<&str>, cwd: &Path) -> (bool, Option<i32>) {
+    let command_string = args.clone().join(" ");
+    println!("running command: `{}`", command_string);
+    let (program, args) = args.split_first().expect("empty command provided");
+
+    let output = Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .await
+        .expect(&format!("command failed to run: `{}`", command_string));
+
+    println!("Command STDOUT:\n{}", pretty_output(&output.stdout));
+    println!("Command STDERR:\n{}", pretty_output(&output.stderr));
+
+    (output.status.success(), output.status.code())
+}
+
+#[allow(dead_code)]
+fn run_test(_test: &str) {
+    todo!("copy");
 }

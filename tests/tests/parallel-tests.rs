@@ -160,7 +160,7 @@ impl DockerTestClient {
             .await
     }
 
-    async fn exposed_ports(&self) -> Result<Vec<bollard::models::Port>, DockerError> {
+    async fn exposed_ports(&self) -> Result<MappedPorts, DockerError> {
         use bollard::models::ContainerSummaryInner;
         let mut filters = HashMap::new();
         filters.insert("name".to_string(), vec![self.service.name()]);
@@ -173,9 +173,9 @@ impl DockerTestClient {
             ports: Some(ports), ..
         }] = &results.as_slice()
         {
-            Ok(ports.to_vec())
+            Ok(ports.to_vec().into())
         } else {
-            Ok(Vec::new())
+            Ok(Vec::new().into())
         }
     }
 }
@@ -210,8 +210,14 @@ async fn parallel_integration_tests() {
         .expect("failed to start container service for IPFS.");
 
     let service_ports = Arc::new(TestServicePorts {
-        postgres: postgres.exposed_ports().await.unwrap().into(),
-        ipfs: ipfs.exposed_ports().await.unwrap().into(),
+        postgres: postgres
+            .exposed_ports()
+            .await
+            .expect("failed to obtain exposed ports for the Postgres container"),
+        ipfs: ipfs
+            .exposed_ports()
+            .await
+            .expect("failed to obtain exposed ports for the IPFS container"),
     });
 
     // run tests
@@ -235,49 +241,6 @@ async fn parallel_integration_tests() {
     ipfs.stop()
         .await
         .expect("failed to stop container service for IPFS");
-}
-
-#[derive(Debug)]
-struct TestServicePorts {
-    postgres: MappedPorts,
-    ipfs: MappedPorts,
-}
-
-#[derive(Debug)]
-struct TestResult {
-    name: String,
-    errors: Vec<String>,
-}
-
-async fn run_integration_test(
-    test_directory: PathBuf,
-    service_ports: Arc<TestServicePorts>,
-) -> TestResult {
-    let ganache = DockerTestClient::start(TestContainerService::Ganache(get_unique_counter()))
-        .await
-        .expect("failed to start container service for Ganache.");
-
-    // TODO: call graph-cli and run yarn tests
-    println!(
-        "Test started for: {}",
-        test_directory.file_name().unwrap().to_string_lossy()
-    );
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    println!("{:#?}", service_ports);
-
-    ganache
-        .stop()
-        .await
-        .expect("failed to stop container service for Ganache");
-
-    TestResult {
-        name: test_directory
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string(),
-        errors: vec![],
-    }
 }
 
 /// Maps `Service => Host` exposed ports.
@@ -304,6 +267,58 @@ impl From<Vec<bollard::models::Port>> for MappedPorts {
             panic!("Error: container exposed no ports.")
         }
         MappedPorts(hashmap)
+    }
+}
+
+/// Provides port mappings for Postgres and IPFS service containers.
+#[derive(Debug)]
+struct TestServicePorts {
+    postgres: MappedPorts,
+    ipfs: MappedPorts,
+}
+
+#[derive(Debug)]
+struct TestResult {
+    name: String,
+    errors: Vec<String>,
+}
+
+async fn run_integration_test(
+    test_directory: PathBuf,
+    service_ports: Arc<TestServicePorts>,
+) -> TestResult {
+    // start a dedicated ganache container for this test
+    let ganache = DockerTestClient::start(TestContainerService::Ganache(get_unique_counter()))
+        .await
+        .expect("failed to start container service for Ganache.");
+
+    let ganache_ports = ganache
+        .exposed_ports()
+        .await
+        .expect("failed to obtain exposed ports for Ganache container");
+    dbg!(ganache_ports);
+
+    // TODO: call graph-cli and run yarn tests
+    println!(
+        "Test started for: {}",
+        test_directory.file_name().unwrap().to_string_lossy()
+    );
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    println!("{:#?}", service_ports);
+
+    // stop ganache container
+    ganache
+        .stop()
+        .await
+        .expect("failed to stop container service for Ganache");
+
+    TestResult {
+        name: test_directory
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string(),
+        errors: vec![],
     }
 }
 

@@ -152,7 +152,7 @@ mod docker {
 
     /// Maps `Service => Host` exposed ports.
     #[derive(Debug)]
-    pub struct MappedPorts(HashMap<u16, u16>);
+    pub struct MappedPorts(pub HashMap<u16, u16>);
 
     impl TryFrom<Vec<bollard::models::Port>> for MappedPorts {
         type Error = &'static str;
@@ -179,6 +179,7 @@ mod docker {
 }
 
 mod helpers {
+    use super::docker::MappedPorts;
     use std::collections::HashSet;
     use std::ffi::OsStr;
     use std::fs;
@@ -188,7 +189,11 @@ mod helpers {
 
     /// A counter for uniquely naming Ganache containers
     static GANACHE_CONTAINER_COUNT: AtomicUsize = AtomicUsize::new(0);
+    /// A counter for uniquely naming Postgres databases
     static POSTGRES_DATABASE_COUNT: AtomicUsize = AtomicUsize::new(0);
+    const POSTGRESQL_DEFAULT_PORT: u16 = 5432;
+    const GANACHE_DEFAULT_PORT: u16 = 8545;
+    const IPFS_DEFAULT_PORT: u16 = 5001;
 
     /// Recursivelly find directories that contains a `subgraph.yaml` file.
     pub fn discover_test_directories(dir: &Path, max_depth: u8) -> io::Result<HashSet<PathBuf>> {
@@ -258,13 +263,51 @@ mod helpers {
         }
         ports
     }
+
+    // Build a postgres connection string
+    pub fn make_postgres_uri(unique_id: u32, postgres_ports: &MappedPorts) -> String {
+        let port = postgres_ports
+            .0
+            .get(&POSTGRESQL_DEFAULT_PORT)
+            .expect("failed to fetch Postgres port from mapped ports");
+        format!(
+            "postgresql://{user}:{password}@{host}:{port}/{database_name}",
+            user = "postgres",
+            password = "postgres",
+            host = "localhost",
+            port = port,
+            database_name = format!("test_database_{}", unique_id),
+        )
+    }
+
+    pub fn make_ipfs_uri(ipfs_ports: &MappedPorts) -> String {
+        let port = ipfs_ports
+            .0
+            .get(&IPFS_DEFAULT_PORT)
+            .expect("failed to fetch IPFS port from mapped ports");
+        format!("{host}:{port}", host = "localhost", port = port)
+    }
+
+    // Build a Ganache connection string
+    pub fn make_ganache_uri(ganache_ports: &MappedPorts) -> String {
+        let port = ganache_ports
+            .0
+            .get(&GANACHE_DEFAULT_PORT)
+            .expect("failed to fetch Ganache port from mapped ports");
+        format!(
+            "test://http://{host}:{port}",
+            host = "localhost",
+            port = port
+        )
+    }
 }
 
 mod integration_testing {
     use super::docker::{DockerTestClient, MappedPorts, TestContainerService};
     use super::helpers::{
         basename, discover_test_directories, get_five_ports, get_unique_ganache_counter,
-        get_unique_postgres_counter, pretty_output,
+        get_unique_postgres_counter, make_ganache_uri, make_ipfs_uri, make_postgres_uri,
+        pretty_output,
     };
     use futures::{stream::futures_unordered::FuturesUnordered, StreamExt};
     use std::fs;
@@ -385,8 +428,8 @@ mod integration_testing {
     /// Prepare and run the integration test
     async fn run_integration_test(
         test_directory: PathBuf,
-        _postgres_ports: Arc<MappedPorts>,
-        _ipfs_ports: Arc<MappedPorts>,
+        postgres_ports: Arc<MappedPorts>,
+        ipfs_ports: Arc<MappedPorts>,
     ) -> IntegrationTestResult {
         // start a dedicated ganache container for this test
         let unique_ganache_counter = get_unique_ganache_counter();
@@ -395,7 +438,7 @@ mod integration_testing {
                 .await
                 .expect("failed to start container service for Ganache.");
 
-        let _ganache_ports = ganache
+        let ganache_ports = ganache
             .exposed_ports()
             .await
             .expect("failed to obtain exposed ports for Ganache container");
@@ -407,9 +450,9 @@ mod integration_testing {
             .expect("failed to infer `graph-node` program location. (Was it built already?)");
 
         // build URIs
-        let postgres_uri = format!("TODO!!!{}", get_unique_postgres_counter());
-        let ipfs_uri = String::from("TODO");
-        let ganache_uri = format!("TODO!!!{}", unique_ganache_counter);
+        let postgres_uri = make_postgres_uri(get_unique_postgres_counter(), &postgres_ports);
+        let ipfs_uri = make_ipfs_uri(&ipfs_ports);
+        let ganache_uri = make_ganache_uri(&ganache_ports);
 
         // run test comand
         let test_setup = IntegrationTestSetup {

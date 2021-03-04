@@ -212,16 +212,17 @@ async fn parallel_integration_tests() {
         .await
         .expect("failed to start container service for IPFS.");
 
-    let service_ports = Arc::new(TestServicePorts {
-        postgres: postgres
+    let postgres_ports = Arc::new(
+        postgres
             .exposed_ports()
             .await
             .expect("failed to obtain exposed ports for the Postgres container"),
-        ipfs: ipfs
-            .exposed_ports()
+    );
+    let ipfs_ports = Arc::new(
+        ipfs.exposed_ports()
             .await
             .expect("failed to obtain exposed ports for the IPFS container"),
-    });
+    );
 
     // run tests
     let mut test_results = Vec::new();
@@ -230,7 +231,8 @@ async fn parallel_integration_tests() {
     for dir in integration_tests_directories.into_iter() {
         tests_futures.push(tokio::spawn(run_integration_test(
             dir,
-            Arc::clone(&service_ports),
+            Arc::clone(&postgres_ports),
+            Arc::clone(&ipfs_ports),
         )));
     }
     while let Some(test_result) = tests_futures.next().await {
@@ -287,13 +289,6 @@ impl TryFrom<Vec<bollard::models::Port>> for MappedPorts {
     }
 }
 
-/// Provides port mappings for Postgres and IPFS service containers.
-#[derive(Debug)]
-struct TestServicePorts {
-    postgres: MappedPorts,
-    ipfs: MappedPorts,
-}
-
 #[derive(Debug)]
 struct TestResult {
     name: String,
@@ -302,7 +297,8 @@ struct TestResult {
 
 async fn run_integration_test(
     test_directory: PathBuf,
-    _service_ports: Arc<TestServicePorts>,
+    _postgres_ports: Arc<MappedPorts>,
+    _ipfs_ports: Arc<MappedPorts>,
 ) -> TestResult {
     // start a dedicated ganache container for this test
     let test_name = basename(&test_directory);

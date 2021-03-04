@@ -188,6 +188,7 @@ mod helpers {
 
     /// A counter for uniquely naming Ganache containers
     static GANACHE_CONTAINER_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static POSTGRES_DATABASE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     /// Recursivelly find directories that contains a `subgraph.yaml` file.
     pub fn discover_test_directories(dir: &Path, max_depth: u8) -> io::Result<HashSet<PathBuf>> {
@@ -216,9 +217,17 @@ mod helpers {
     }
 
     /// Fetches a unique number for naming Ganache containers
-    pub fn get_unique_counter() -> u32 {
-        let old_ganache_count = GANACHE_CONTAINER_COUNT.fetch_add(1, Ordering::SeqCst);
-        (old_ganache_count + 1) as u32
+    pub fn get_unique_ganache_counter() -> u32 {
+        increase_atomic_counter(&GANACHE_CONTAINER_COUNT)
+    }
+    /// Fetches a unique number for naming Postgres databases
+    pub fn get_unique_postgres_counter() -> u32 {
+        increase_atomic_counter(&POSTGRES_DATABASE_COUNT)
+    }
+
+    fn increase_atomic_counter(counter: &'static AtomicUsize) -> u32 {
+        let old_count = counter.fetch_add(1, Ordering::SeqCst);
+        old_count as u32 + 1
     }
 
     /// Parses stdio bytes into a prefixed String
@@ -254,7 +263,8 @@ mod helpers {
 mod integration_testing {
     use super::docker::{DockerTestClient, MappedPorts, TestContainerService};
     use super::helpers::{
-        basename, discover_test_directories, get_five_ports, get_unique_counter, pretty_output,
+        basename, discover_test_directories, get_five_ports, get_unique_ganache_counter,
+        get_unique_postgres_counter, pretty_output,
     };
     use futures::{stream::futures_unordered::FuturesUnordered, StreamExt};
     use std::fs;
@@ -269,6 +279,8 @@ mod integration_testing {
         ipfs_uri: String,
         ganache_uri: String,
         graph_node_ports: [u16; 5],
+        graph_node_bin: PathBuf,
+        graph_cli_bin: PathBuf,
         test_directory: PathBuf,
     }
 
@@ -281,7 +293,6 @@ mod integration_testing {
     /// Info about a finished test command
     #[derive(Debug)]
     struct TestCommandResults {
-        test_setup: IntegrationTestSetup,
         success: bool,
         exit_code: Option<i32>,
         stdout: String,
@@ -373,32 +384,45 @@ mod integration_testing {
 
     /// Prepare and run the integration test
     async fn run_integration_test(
-        dir: PathBuf,
+        test_directory: PathBuf,
         _postgres_ports: Arc<MappedPorts>,
         _ipfs_ports: Arc<MappedPorts>,
     ) -> IntegrationTestResult {
         // start a dedicated ganache container for this test
-        let ganache = DockerTestClient::start(TestContainerService::Ganache(get_unique_counter()))
-            .await
-            .expect("failed to start container service for Ganache.");
+        let unique_ganache_counter = get_unique_ganache_counter();
+        let ganache =
+            DockerTestClient::start(TestContainerService::Ganache(unique_ganache_counter))
+                .await
+                .expect("failed to start container service for Ganache.");
 
         let _ganache_ports = ganache
             .exposed_ports()
             .await
             .expect("failed to obtain exposed ports for Ganache container");
 
-        let _graph_node_ports = get_five_ports();
-
-        println!("Test started: {}", basename(&dir));
-
         // discover programs paths
-        let _graph_cli = dir.join("node_modules/.bin/graph");
-        let _graph_node = fs::canonicalize("../target/debug/graph-node")
+        let graph_cli = fs::canonicalize(test_directory.join("node_modules/.bin/graph"))
+            .expect("failed to infer `@graphprotocol/graph-cli` program location.");
+        let graph_node = fs::canonicalize("../target/debug/graph-node")
             .expect("failed to infer `graph-node` program location. (Was it built already?)");
 
-        let test_setup = todo!();
-        // run the test
-        let command_results = run_test_command(test_setup).await;
+        // build URIs
+        let postgres_uri = format!("TODO!!!{}", get_unique_postgres_counter());
+        let ipfs_uri = String::from("TODO");
+        let ganache_uri = format!("TODO!!!{}", unique_ganache_counter);
+
+        // run test comand
+        let test_setup = IntegrationTestSetup {
+            postgres_uri,
+            ipfs_uri,
+            ganache_uri,
+            graph_node_ports: get_five_ports(),
+            graph_node_bin: graph_node,
+            graph_cli_bin: graph_cli,
+            test_directory,
+        };
+        println!("Test started: {}", basename(&test_setup.test_directory));
+        let command_results = run_test_command(&test_setup).await;
 
         // stop ganache container
         ganache
@@ -413,24 +437,18 @@ mod integration_testing {
     }
 
     /// Runs a command for a integration test
-    async fn run_test_command(test_setup: IntegrationTestSetup) -> TestCommandResults {
-        let args = todo!();
-        let command_string = args.clone().join(" ");
-        let (program, args) = args.split_first().expect("empty command provided");
-
-        let output = Command::new(program)
-            .args(args)
-            .current_dir(test_setup.test_directory)
+    async fn run_test_command(test_setup: &IntegrationTestSetup) -> TestCommandResults {
+        let output = Command::new(&test_setup.graph_cli_bin)
+            .current_dir(&test_setup.test_directory)
             .output()
             .await
-            .expect(&format!("command failed to run: `{}`", command_string));
+            .expect("failed to run test command");
 
         let test_name = test_setup.test_name();
         let stdout_tag = format!("[{}:stdout]", test_name);
         let stderr_tag = format!("[{}:stderr]", test_name);
 
         TestCommandResults {
-            test_setup,
             success: output.status.success(),
             exit_code: output.status.code(),
             stdout: pretty_output(&output.stdout, &stdout_tag),

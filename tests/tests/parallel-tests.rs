@@ -170,18 +170,18 @@ impl DockerTestClient {
         filters.insert("name".to_string(), vec![self.service.name()]);
         let options = Some(container::ListContainersOptions {
             filters,
+            limit: Some(1),
             ..Default::default()
         });
         let results = self.client.list_containers(options).await?;
-
-        // TODO: sometimes the program crashes complaining that "there are no exposed ports", but
-        // upon close inspection, container does have exposed ports. Maybe this is an API/networking
-        // error which might be worth investigating.
         match &results.as_slice() {
             &[ContainerSummaryInner {
                 ports: Some(ports), ..
             }] => Ok(ports.to_vec().try_into().unwrap()),
-            _ => panic!("container exposed no ports: {}", self.service.name()),
+            unexpected_response => panic!(
+                "Received a unexpected_response from docker API: {:#?}",
+                unexpected_response
+            ),
         }
     }
 }

@@ -2,7 +2,6 @@ mod docker {
     use bollard::models::HostConfig;
     use bollard::{container, Docker};
     use std::collections::HashMap;
-    use std::convert::{TryFrom, TryInto};
 
     const POSTGRES_IMAGE: &'static str = "postgres";
     const IPFS_IMAGE: &'static str = "ipfs/go-ipfs:v0.4.23";
@@ -138,15 +137,17 @@ mod docker {
                 ..Default::default()
             });
             let results = self.client.list_containers(options).await?;
-            match &results.as_slice() {
+            let ports = match &results.as_slice() {
                 &[ContainerSummaryInner {
                     ports: Some(ports), ..
-                }] => Ok(ports.to_vec().try_into().unwrap()),
+                }] => ports,
                 unexpected_response => panic!(
                     "Received a unexpected_response from docker API: {:#?}",
                     unexpected_response
                 ),
-            }
+            };
+            let mapped_ports = ports.to_vec().into();
+            Ok(mapped_ports)
         }
     }
 
@@ -154,9 +155,8 @@ mod docker {
     #[derive(Debug)]
     pub struct MappedPorts(pub HashMap<u16, u16>);
 
-    impl TryFrom<Vec<bollard::models::Port>> for MappedPorts {
-        type Error = &'static str;
-        fn try_from(input: Vec<bollard::models::Port>) -> Result<Self, Self::Error> {
+    impl From<Vec<bollard::models::Port>> for MappedPorts {
+        fn from(input: Vec<bollard::models::Port>) -> Self {
             let mut hashmap = HashMap::new();
 
             for port in &input {
@@ -170,10 +170,9 @@ mod docker {
                 }
             }
             if hashmap.is_empty() {
-                Err("Container exposed no ports")
-            } else {
-                Ok(MappedPorts(hashmap))
+                panic!("Container exposed no ports. Input={:?}", input)
             }
+            MappedPorts(hashmap)
         }
     }
 }
@@ -288,17 +287,18 @@ mod helpers {
         format!("{host}:{port}", host = "localhost", port = port)
     }
 
-    // Build a Ganache connection string
-    pub fn make_ganache_uri(ganache_ports: &MappedPorts) -> String {
+    // Build a Ganache connection string. Returns the port number and the URI.
+    pub fn make_ganache_uri(ganache_ports: &MappedPorts) -> (u16, String) {
         let port = ganache_ports
             .0
             .get(&GANACHE_DEFAULT_PORT)
             .expect("failed to fetch Ganache port from mapped ports");
-        format!(
+        let uri = format!(
             "test://http://{host}:{port}",
             host = "localhost",
             port = port
-        )
+        );
+        (port.clone(), uri)
     }
 }
 
@@ -313,17 +313,17 @@ mod integration_testing {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use tokio::process::Command;
+    use tokio::process::{Child, Command};
 
     /// Contains all information a test command needs
     #[derive(Debug)]
     struct IntegrationTestSetup {
         postgres_uri: String,
         ipfs_uri: String,
+        ganache_port: u16,
         ganache_uri: String,
         graph_node_ports: [u16; 5],
-        graph_node_bin: PathBuf,
-        graph_cli_bin: PathBuf,
+        graph_node_bin: Arc<PathBuf>,
         test_directory: PathBuf,
     }
 
@@ -388,6 +388,11 @@ mod integration_testing {
                 .expect("failed to obtain exposed ports for the IPFS container"),
         );
 
+        let graph_node = Arc::new(
+            fs::canonicalize("../target/debug/graph-node")
+                .expect("failed to infer `graph-node` program location. (Was it built already?)"),
+        );
+
         // run tests
         let mut test_results = Vec::new();
         let mut exit_code: i32 = 0;
@@ -395,8 +400,9 @@ mod integration_testing {
         for dir in integration_tests_directories.into_iter() {
             tests_futures.push(tokio::spawn(run_integration_test(
                 dir,
-                Arc::clone(&postgres_ports),
-                Arc::clone(&ipfs_ports),
+                postgres_ports.clone(),
+                ipfs_ports.clone(),
+                graph_node.clone(),
             )));
         }
         while let Some(test_result) = tests_futures.next().await {
@@ -430,6 +436,7 @@ mod integration_testing {
         test_directory: PathBuf,
         postgres_ports: Arc<MappedPorts>,
         ipfs_ports: Arc<MappedPorts>,
+        graph_node_bin: Arc<PathBuf>,
     ) -> IntegrationTestResult {
         // start a dedicated ganache container for this test
         let unique_ganache_counter = get_unique_ganache_counter();
@@ -444,28 +451,34 @@ mod integration_testing {
             .expect("failed to obtain exposed ports for Ganache container");
 
         // discover programs paths
-        let graph_cli = fs::canonicalize(test_directory.join("node_modules/.bin/graph"))
-            .expect("failed to infer `@graphprotocol/graph-cli` program location.");
-        let graph_node = fs::canonicalize("../target/debug/graph-node")
-            .expect("failed to infer `graph-node` program location. (Was it built already?)");
 
         // build URIs
         let postgres_uri = make_postgres_uri(get_unique_postgres_counter(), &postgres_ports);
         let ipfs_uri = make_ipfs_uri(&ipfs_ports);
-        let ganache_uri = make_ganache_uri(&ganache_ports);
+        let (ganache_port, ganache_uri) = make_ganache_uri(&ganache_ports);
 
-        // run test comand
+        // prepare to run test comand
         let test_setup = IntegrationTestSetup {
             postgres_uri,
             ipfs_uri,
             ganache_uri,
+            ganache_port,
+            graph_node_bin,
             graph_node_ports: get_five_ports(),
-            graph_node_bin: graph_node,
-            graph_cli_bin: graph_cli,
             test_directory,
         };
+
+        // spawn graph-node
+        let mut graph_node_child_command = run_graph_node(&test_setup).await;
+
         println!("Test started: {}", basename(&test_setup.test_directory));
         let command_results = run_test_command(&test_setup).await;
+
+        // stop graph-node
+        graph_node_child_command
+            .kill()
+            .await
+            .expect("Failed to kill graph-node");
 
         // stop ganache container
         ganache
@@ -499,5 +512,36 @@ mod integration_testing {
             stdout: pretty_output(&output.stdout, &stdout_tag),
             stderr: pretty_output(&output.stderr, &stderr_tag),
         }
+    }
+    async fn run_graph_node(test_setup: &IntegrationTestSetup) -> Child {
+        use std::process::Stdio;
+        Command::new(&*test_setup.graph_node_bin)
+            .stdout(Stdio::null())
+            // postgres
+            .arg("--postgres-url")
+            .arg(&test_setup.postgres_uri)
+            // ethereum
+            .arg("--ethereum-rpc")
+            .arg(&test_setup.ganache_uri)
+            // ipfs
+            .arg("--ipfs")
+            .arg(&test_setup.ipfs_uri)
+            // http port
+            .arg("--http-port")
+            .arg(test_setup.graph_node_ports[0].to_string())
+            // index node port
+            .arg("--index-node-port")
+            .arg(test_setup.graph_node_ports[1].to_string())
+            // ws  port
+            .arg("--ws-port")
+            .arg(test_setup.graph_node_ports[2].to_string())
+            // admin  port
+            .arg("--admin-port")
+            .arg(test_setup.graph_node_ports[3].to_string())
+            // metrics  port
+            .arg("--metrics-port")
+            .arg(test_setup.graph_node_ports[4].to_string())
+            .spawn()
+            .expect("failed to start graph-node command.")
     }
 }

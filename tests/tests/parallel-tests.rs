@@ -481,7 +481,9 @@ mod integration_testing {
 
     /// Runs a command for a integration test
     async fn run_test_command(test_setup: &IntegrationTestSetup) -> TestCommandResults {
-        let output = Command::new(&test_setup.graph_cli_bin)
+        let output = Command::new("yarn")
+            .arg("test")
+            .env("GANACHE_TEST_PORT", test_setup.ganache_port.to_string())
             .current_dir(&test_setup.test_directory)
             .output()
             .await

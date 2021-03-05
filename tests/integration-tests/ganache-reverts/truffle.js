@@ -5,7 +5,7 @@ module.exports = {
   networks: {
     test: {
       host: "localhost",
-      port: 18545,
+      port: process.env.GANACHE_TEST_PORT || 18545,
       network_id: "*",
       gas: "100000000000",
       gasPrice: "1"

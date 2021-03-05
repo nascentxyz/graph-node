@@ -1,7 +1,10 @@
 mod docker {
+    use super::helpers::contains_subslice;
     use bollard::models::HostConfig;
     use bollard::{container, Docker};
     use std::collections::HashMap;
+    use tokio::time::{sleep, Duration};
+    use tokio_stream::StreamExt;
 
     const POSTGRES_IMAGE: &'static str = "postgres";
     const IPFS_IMAGE: &'static str = "ipfs/go-ipfs:v0.4.23";
@@ -148,6 +151,38 @@ mod docker {
             };
             let mapped_ports = ports.to_vec().into();
             Ok(mapped_ports)
+        }
+
+        /// halts execution until a trigger message is detected on stdout
+        pub async fn wait_for_message(&self, trigger_message: &[u8]) -> Result<&Self, DockerError> {
+            // listen to container logs
+            let mut stream = self.client.logs::<String>(
+                &self.service.name(),
+                Some(container::LogsOptions {
+                    follow: true,
+                    stdout: true,
+                    stderr: true,
+                    ..Default::default()
+                }),
+            );
+
+            // halt execution until a message is received
+            loop {
+                match stream.next().await {
+                    Some(Ok(container::LogOutput::StdOut { message })) => {
+                        if contains_subslice(&message, &trigger_message) {
+                            break Ok(self);
+                        } else {
+                            sleep(Duration::from_millis(100)).await;
+                        }
+                    }
+                    Some(Err(error)) => break Err(error),
+                    None => {
+                        panic!("stream ended before expected message could be detected")
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -300,6 +335,10 @@ mod helpers {
         );
         (port.clone(), uri)
     }
+
+    pub fn contains_subslice<T: PartialEq>(data: &[T], needle: &[T]) -> bool {
+        data.windows(needle.len()).any(|w| w == needle)
+    }
 }
 
 mod integration_testing {
@@ -368,13 +407,21 @@ mod integration_testing {
             println!("  - {}", basename(dir));
         }
 
-        // start docker containers for Postgres and IPFS
+        // start docker containers for Postgres and IPFS and wait for them to be ready
         let postgres = DockerTestClient::start(TestContainerService::Postgres)
             .await
             .expect("failed to start container service for Postgres.");
+        postgres
+            .wait_for_message(b"database system is ready to accept connections")
+            .await
+            .expect("failed to wait for Postgres container to be ready to accept connections");
+
         let ipfs = DockerTestClient::start(TestContainerService::Ipfs)
             .await
             .expect("failed to start container service for IPFS.");
+        ipfs.wait_for_message(b"Daemon is ready")
+            .await
+            .expect("failed to wait for Ipfs container to be ready to accept connections");
 
         let postgres_ports = Arc::new(
             postgres
@@ -444,6 +491,10 @@ mod integration_testing {
             DockerTestClient::start(TestContainerService::Ganache(unique_ganache_counter))
                 .await
                 .expect("failed to start container service for Ganache.");
+        ganache
+            .wait_for_message(b"Listening on ")
+            .await
+            .expect("failed to wait for Ganache container to be ready to accept connections");
 
         let ganache_ports = ganache
             .exposed_ports()
